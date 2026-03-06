@@ -68,6 +68,15 @@ function isNumeric(value: string): boolean {
 }
 
 /**
+ * Detect values that should be treated as "not answered" or skipped.
+ * These values should be excluded from both numerator and denominator in calculations.
+ */
+function isSkippedValue(value: string): boolean {
+  const v = value.trim().toLowerCase();
+  return v === '' || v === 'n/a' || v === 'na' || v === 'skipped' || v === 'not answered' || v === '-';
+}
+
+/**
  * Parse a survey responses CSV (e.g. SurveySparrow export).
  * Detects rating columns by headers containing "(Out of N)" and optional "N.M - " prefix.
  * Multiple response rows are averaged per question.
@@ -143,7 +152,7 @@ export function parseResponsesCsv(csvText: string): ParsedCsvResult {
     const cells = parseCsvLine(lines[rowIdx]);
     for (const col of ratingColumns) {
       const raw = cells[col.columnIndex];
-      if (!isNumeric(raw)) continue;
+      if (isSkippedValue(raw) || !isNumeric(raw)) continue;
       const num = Number(raw);
       const qid = `S${col.sectionNum}_Q${col.questionNum}`;
       const list = valueByQuestionId.get(qid) ?? [];
@@ -156,7 +165,8 @@ export function parseResponsesCsv(csvText: string): ParsedCsvResult {
   for (const col of ratingColumns) {
     const qid = `S${col.sectionNum}_Q${col.questionNum}`;
     const values = valueByQuestionId.get(qid) ?? [];
-    const avg = values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0;
+    if (values.length === 0) continue;
+    const avg = values.reduce((a, b) => a + b, 0) / values.length;
     responses.push({ questionId: qid, value: avg });
   }
 
@@ -333,7 +343,7 @@ export function parseResponsesCsvBySubject(
     const ratings = new Map<string, number>();
     for (const col of ratingColumns) {
       const raw = cells[col.columnIndex];
-      if (!isNumeric(raw)) continue;
+      if (isSkippedValue(raw) || !isNumeric(raw)) continue;
       const qid = `S${col.sectionNum}_Q${col.questionNum}`;
       ratings.set(qid, Number(raw));
     }
@@ -375,18 +385,21 @@ export function parseResponsesCsvBySubject(
   ): NormalizedSectionResult[] {
     const result: NormalizedSectionResult[] = [];
     for (const sec of sections) {
-      const questions = sec.questions.map((q) => {
-        const rawVal = questionAvgs.get(q.id) ?? 0;
-        const { percentage, score } = normalizeValue(rawVal, q.id);
-        return {
-          questionId: q.id,
-          sectionId: sec.id,
-          questionText: q.text,
-          rawValue: options.roundingActive ? roundTo(rawVal, options.roundingDecimals) : rawVal,
-          percentage,
-          score,
-        };
-      });
+      const questions = sec.questions
+        .filter((q) => questionAvgs.has(q.id))
+        .map((q) => {
+          const rawVal = questionAvgs.get(q.id)!;
+          const { percentage, score } = normalizeValue(rawVal, q.id);
+          return {
+            questionId: q.id,
+            sectionId: sec.id,
+            questionText: q.text,
+            rawValue: options.roundingActive ? roundTo(rawVal, options.roundingDecimals) : rawVal,
+            percentage,
+            score,
+          };
+        });
+      if (questions.length === 0) continue;
       const avgPct = mean(questions.map((q) => q.percentage));
       const avgSc = mean(questions.map((q) => q.score));
       result.push({
@@ -403,6 +416,8 @@ export function parseResponsesCsvBySubject(
   const subjects: SubjectResult[] = [];
   for (const [, subj] of subjectMap) {
     const relationships: RelationshipResult[] = [];
+    const allIndividualScores: number[] = [];
+    const allIndividualPcts: number[] = [];
 
     for (const [relation, relRows] of subj.rowsByRelation) {
       const questionValues = new Map<string, number[]>();
@@ -422,6 +437,11 @@ export function parseResponsesCsvBySubject(
       const allQs = sectionResults.flatMap((s) => s.questions);
       const overallPct = mean(allQs.map((q) => q.percentage));
       const overallSc = mean(allQs.map((q) => q.score));
+
+      allQs.forEach((q) => {
+        allIndividualScores.push(q.score);
+        allIndividualPcts.push(q.percentage);
+      });
 
       relationships.push({
         relation,
@@ -457,10 +477,8 @@ export function parseResponsesCsvBySubject(
     }
     const overallSections = computeSectionsFromRatings(overallQuestionAvgs);
 
-    const relationshipOverallScores = sortedRelationships.map((r) => r.summary.overallAverageScore);
-    const relationshipOverallPcts = sortedRelationships.map((r) => r.summary.overallAveragePercentage);
-    const overallSc = mean(relationshipOverallScores);
-    const overallPct = mean(relationshipOverallPcts);
+    const overallSc = mean(allIndividualScores);
+    const overallPct = mean(allIndividualPcts);
 
     subjects.push({
       subjectName: subj.name,

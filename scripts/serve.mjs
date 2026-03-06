@@ -157,6 +157,222 @@ async function handleApiRequest(req, res) {
       return;
     }
 
+    if (url === '/api/normalize/surveysparrow') {
+      const { surveySettings, responses, normalizeToValue, roundingActive, roundingDecimals } = body;
+      if (!responses || !Array.isArray(responses)) {
+        sendJson(res, 400, { error: 'Missing or invalid responses array in request body' });
+        return;
+      }
+
+      const normalizeVal = Number.isFinite(normalizeToValue) ? normalizeToValue : 
+        (surveySettings?.properties?.normalizeToValue ?? 5);
+      const doRounding = roundingActive !== false;
+      const roundDecimals = Number.isFinite(roundingDecimals) ? roundingDecimals : 
+        (surveySettings?.properties?.settings?.roundOffScores?.value ?? 1);
+
+      function roundTo(value, decimals) {
+        if (!Number.isFinite(value)) return value;
+        const factor = 10 ** decimals;
+        return Math.round(value * factor) / factor;
+      }
+
+      function mean(values) {
+        if (values.length === 0) return 0;
+        return values.reduce((a, b) => a + b, 0) / values.length;
+      }
+
+      function isSkippedAnswer(val) {
+        if (val === null || val === undefined) return true;
+        if (val.skipped === true) return true;
+        if (typeof val.answer !== 'number') return true;
+        if (!Number.isFinite(val.answer)) return true;
+        return false;
+      }
+
+      const subjectMap = new Map();
+      const questionMeta = new Map();
+
+      for (const resp of responses) {
+        const subjectEmail = resp.subjectemail || '';
+        const subjectName = `${resp.subjectfirstname || ''} ${resp.subjectlastname || ''}`.trim();
+        const relation = resp.evaluatorrelation || 'Unknown';
+        const submission = resp.submission || {};
+
+        if (!subjectEmail) continue;
+
+        if (!subjectMap.has(subjectEmail)) {
+          subjectMap.set(subjectEmail, {
+            name: subjectName,
+            email: subjectEmail,
+            rowsByRelation: new Map(),
+          });
+        }
+        const subj = subjectMap.get(subjectEmail);
+
+        if (!subj.rowsByRelation.has(relation)) {
+          subj.rowsByRelation.set(relation, []);
+        }
+
+        const ratings = new Map();
+        for (const [key, val] of Object.entries(submission)) {
+          if (!key.startsWith('question_')) continue;
+          if (typeof val !== 'object' || val === null) continue;
+          if (isSkippedAnswer(val)) continue;
+
+          const qid = key.replace('question_', '');
+          const scaleLen = val.scale_length || 5;
+          ratings.set(qid, val.answer);
+
+          if (!questionMeta.has(qid)) {
+            questionMeta.set(qid, { scale: scaleLen, section: 'S1' });
+          }
+        }
+
+        subj.rowsByRelation.get(relation).push({ ratings });
+      }
+
+      const questionScaleMap = new Map();
+      for (const [qid, meta] of questionMeta) {
+        questionScaleMap.set(qid, meta.scale);
+      }
+
+      function normalizeValue(raw, qid) {
+        const qScale = questionScaleMap.get(qid) || 5;
+        const pct = (raw / qScale) * 100;
+        const sc = (raw / qScale) * normalizeVal;
+        if (doRounding) {
+          return { percentage: roundTo(pct, roundDecimals), score: roundTo(sc, roundDecimals) };
+        }
+        return { percentage: pct, score: sc };
+      }
+
+      function computeSections(questionAvgs) {
+        const sectionMap = new Map();
+        for (const [qid, rawVal] of questionAvgs) {
+          const sid = 'S1';
+          if (!sectionMap.has(sid)) {
+            sectionMap.set(sid, { id: sid, name: 'Section 1', questions: [] });
+          }
+          const { percentage, score } = normalizeValue(rawVal, qid);
+          sectionMap.get(sid).questions.push({
+            questionId: qid,
+            sectionId: sid,
+            questionText: `Question ${qid}`,
+            rawValue: doRounding ? roundTo(rawVal, roundDecimals) : rawVal,
+            percentage,
+            score,
+          });
+        }
+
+        const result = [];
+        for (const [, sec] of sectionMap) {
+          if (sec.questions.length === 0) continue;
+          const avgPct = mean(sec.questions.map((q) => q.percentage));
+          const avgSc = mean(sec.questions.map((q) => q.score));
+          result.push({
+            sectionId: sec.id,
+            sectionName: sec.name,
+            questions: sec.questions,
+            averagePercentage: doRounding ? roundTo(avgPct, roundDecimals) : avgPct,
+            averageScore: doRounding ? roundTo(avgSc, roundDecimals) : avgSc,
+          });
+        }
+        return result;
+      }
+
+      const subjects = [];
+      for (const [, subj] of subjectMap) {
+        const relationships = [];
+        const allIndividualScores = [];
+        const allIndividualPcts = [];
+
+        for (const [relation, relRows] of subj.rowsByRelation) {
+          const questionValues = new Map();
+          for (const row of relRows) {
+            for (const [qid, val] of row.ratings) {
+              if (!questionValues.has(qid)) questionValues.set(qid, []);
+              questionValues.get(qid).push(val);
+            }
+          }
+
+          const questionAvgs = new Map();
+          for (const [qid, vals] of questionValues) {
+            if (vals.length > 0) {
+              questionAvgs.set(qid, mean(vals));
+            }
+          }
+
+          const sectionResults = computeSections(questionAvgs);
+          const allQs = sectionResults.flatMap((s) => s.questions);
+          if (allQs.length === 0) continue;
+          
+          const overallPct = mean(allQs.map((q) => q.percentage));
+          const overallSc = mean(allQs.map((q) => q.score));
+
+          allQs.forEach((q) => {
+            allIndividualScores.push(q.score);
+            allIndividualPcts.push(q.percentage);
+          });
+
+          relationships.push({
+            relation,
+            evaluatorCount: relRows.length,
+            sections: sectionResults,
+            summary: {
+              overallAveragePercentage: doRounding ? roundTo(overallPct, roundDecimals) : overallPct,
+              overallAverageScore: doRounding ? roundTo(overallSc, roundDecimals) : overallSc,
+            },
+          });
+        }
+
+        if (relationships.length === 0) continue;
+
+        const sortedRelationships = relationships.sort((a, b) => {
+          const order = ['Self', 'Manager', 'Peer', 'Reportee'];
+          return order.indexOf(a.relation) - order.indexOf(b.relation);
+        });
+
+        const overallQuestionAvgs = new Map();
+        for (const [qid] of questionScaleMap) {
+          const relAvgs = sortedRelationships
+            .map((r) => {
+              const sec = r.sections[0];
+              const qData = sec?.questions.find((q) => q.questionId === qid);
+              return qData?.rawValue;
+            })
+            .filter((v) => v !== undefined);
+          if (relAvgs.length > 0) {
+            overallQuestionAvgs.set(qid, mean(relAvgs));
+          }
+        }
+        const overallSections = computeSections(overallQuestionAvgs);
+
+        const overallSc = mean(allIndividualScores);
+        const overallPct = mean(allIndividualPcts);
+
+        subjects.push({
+          subjectName: subj.name,
+          subjectEmail: subj.email,
+          relationships: sortedRelationships,
+          overallSections,
+          overallSummary: {
+            overallAveragePercentage: doRounding ? roundTo(overallPct, roundDecimals) : overallPct,
+            overallAverageScore: doRounding ? roundTo(overallSc, roundDecimals) : overallSc,
+          },
+        });
+      }
+
+      subjects.sort((a, b) => a.subjectName.localeCompare(b.subjectName));
+
+      sendJson(res, 200, {
+        subjects,
+        scaleLength: 'mixed',
+        totalResponseCount: responses.length,
+        questionScales: Object.fromEntries(questionScaleMap),
+      });
+      return;
+    }
+
     sendJson(res, 404, { error: 'API endpoint not found' });
   } catch (e) {
     sendJson(res, 500, { error: e.message || String(e) });

@@ -157,6 +157,44 @@ async function handleApiRequest(req, res) {
       return;
     }
 
+    if (url === '/api/csv/structure') {
+      if (!csvParserModule) {
+        sendJson(res, 500, { error: 'CSV parser module not loaded. Run npm run build first.' });
+        return;
+      }
+      const { csvText } = body;
+      if (!csvText) {
+        sendJson(res, 400, { error: 'Missing csvText in request body' });
+        return;
+      }
+      const structure = csvParserModule.extractCsvStructure(csvText);
+      sendJson(res, 200, structure);
+      return;
+    }
+
+    if (url === '/api/normalize/csv-weighted') {
+      if (!csvParserModule) {
+        sendJson(res, 500, { error: 'CSV parser module not loaded. Run npm run build first.' });
+        return;
+      }
+      const { csvText, normalizeToValue, roundingActive, roundingDecimals, scaleLength, startScaleFromZero, weights } = body;
+      if (!csvText) {
+        sendJson(res, 400, { error: 'Missing csvText in request body' });
+        return;
+      }
+      const options = {
+        normalizeToValue: Number.isFinite(normalizeToValue) ? normalizeToValue : 5,
+        scaleLength: Number.isFinite(scaleLength) ? scaleLength : 5,
+        startScaleFromZero: startScaleFromZero === true,
+        roundingActive: roundingActive !== false,
+        roundingDecimals: Number.isFinite(roundingDecimals) ? roundingDecimals : 1,
+        weights: weights || { roles: {}, sections: {}, questions: {} },
+      };
+      const result = csvParserModule.parseResponsesCsvBySubjectWeighted(csvText, options);
+      sendJson(res, 200, result);
+      return;
+    }
+
     if (url === '/api/normalize/surveysparrow') {
       const { surveySettings, responses, normalizeToValue, roundingActive, roundingDecimals } = body;
       if (!responses || !Array.isArray(responses)) {

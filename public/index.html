@@ -143,6 +143,34 @@
                 </label>
               </label>
             </div>
+
+            <div id="weightage-config" class="weightage-config hidden">
+              <div class="weightage-header">
+                <label class="checkbox">
+                  <input id="use-weightages" type="checkbox" />
+                  Enable Weightages
+                </label>
+                <span class="muted" style="font-size: 12px;">Weights are multipliers (default: 1). Higher weight = more impact on final score.</span>
+              </div>
+              <div id="weightage-inputs" class="weightage-inputs hidden">
+                <div class="weightage-section">
+                  <h4>Role Weightages</h4>
+                  <div id="role-weights" class="weight-grid"></div>
+                </div>
+                <div class="weightage-section">
+                  <h4>Section (Competency) Weightages</h4>
+                  <div id="section-weights" class="weight-grid"></div>
+                </div>
+                <div class="weightage-section">
+                  <div class="weightage-section-header">
+                    <h4>Question Weightages</h4>
+                    <button type="button" id="toggle-question-weights" class="btn-link">Show</button>
+                  </div>
+                  <div id="question-weights" class="weight-grid hidden"></div>
+                </div>
+              </div>
+            </div>
+
             <div class="actions actions--block">
               <button id="csv-calc" type="button" disabled>Calculate from CSV</button>
             </div>
@@ -166,6 +194,7 @@
 
         var csvText = null;
         var lastResultData = null;
+        var csvStructure = null;
 
         function byId(id) {
           var el = document.getElementById(id);
@@ -506,11 +535,14 @@
           }
         }
 
-        function handleCsvFile(file) {
+        async function handleCsvFile(file) {
           clearError();
           csvText = null;
+          csvStructure = null;
           byId('csv-calc').disabled = true;
           byId('csv-summary').classList.add('hidden');
+          byId('weightage-config').classList.add('hidden');
+          byId('use-weightages').checked = false;
 
           if (!file || !file.name.toLowerCase().endsWith('.csv')) {
             showError('Please select a .csv file.');
@@ -518,17 +550,115 @@
           }
 
           var reader = new FileReader();
-          reader.onload = function() {
+          reader.onload = async function() {
             csvText = reader.result || '';
             byId('csv-upload-label').textContent = file.name;
-            byId('csv-summary').textContent = 'File loaded. Click "Calculate from CSV" to process.';
+            byId('csv-summary').textContent = 'Analyzing CSV structure...';
             byId('csv-summary').classList.remove('hidden');
+
+            try {
+              var res = await fetch('/api/csv/structure', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ csvText: csvText })
+              });
+              var data = await res.json();
+              if (!res.ok) {
+                throw new Error(data.error || 'Failed to analyze CSV');
+              }
+              csvStructure = data;
+              renderWeightageConfig(csvStructure);
+              byId('csv-summary').textContent = 'File loaded: ' + csvStructure.roles.length + ' roles, ' + csvStructure.sections.length + ' sections detected.';
+              byId('weightage-config').classList.remove('hidden');
+            } catch (e) {
+              byId('csv-summary').textContent = 'File loaded. Click "Calculate from CSV" to process.';
+            }
             byId('csv-calc').disabled = false;
           };
           reader.onerror = function() {
             showError('Failed to read file.');
           };
           reader.readAsText(file, 'UTF-8');
+        }
+
+        function renderWeightageConfig(structure) {
+          var roleWeightsEl = byId('role-weights');
+          var sectionWeightsEl = byId('section-weights');
+          var questionWeightsEl = byId('question-weights');
+
+          var roleHtml = [];
+          structure.roles.forEach(function(role) {
+            roleHtml.push(
+              '<div class="weight-item">' +
+              '<label>' + escapeHtml(role) +
+              '<input type="number" data-weight-type="role" data-weight-id="' + escapeHtml(role) + '" value="1" min="0" step="1" />' +
+              '</label></div>'
+            );
+          });
+          roleWeightsEl.innerHTML = roleHtml.join('');
+
+          var sectionHtml = [];
+          structure.sections.forEach(function(sec) {
+            sectionHtml.push(
+              '<div class="weight-item">' +
+              '<label>' + escapeHtml(sec.name) +
+              '<input type="number" data-weight-type="section" data-weight-id="' + escapeHtml(sec.id) + '" value="1" min="0" step="1" />' +
+              '</label></div>'
+            );
+          });
+          sectionWeightsEl.innerHTML = sectionHtml.join('');
+
+          var questionHtml = [];
+          structure.sections.forEach(function(sec) {
+            questionHtml.push('<div class="weight-section-group"><strong>' + escapeHtml(sec.name) + '</strong></div>');
+            sec.questions.forEach(function(q) {
+              var shortText = q.text.length > 50 ? q.text.substring(0, 50) + '...' : q.text;
+              questionHtml.push(
+                '<div class="weight-item weight-item--question">' +
+                '<label title="' + escapeHtml(q.text) + '">' + escapeHtml(shortText) + ' <span class="muted">(1-' + q.scale + ')</span>' +
+                '<input type="number" data-weight-type="question" data-weight-id="' + escapeHtml(q.id) + '" value="1" min="0" step="1" />' +
+                '</label></div>'
+              );
+            });
+          });
+          questionWeightsEl.innerHTML = questionHtml.join('');
+        }
+
+        function getWeights() {
+          var weights = { roles: {}, sections: {}, questions: {} };
+
+          document.querySelectorAll('input[data-weight-type="role"]').forEach(function(input) {
+            var id = input.getAttribute('data-weight-id');
+            var val = Number(input.value);
+            if (val !== 1 && Number.isFinite(val)) {
+              weights.roles[id] = val;
+            }
+          });
+
+          document.querySelectorAll('input[data-weight-type="section"]').forEach(function(input) {
+            var id = input.getAttribute('data-weight-id');
+            var val = Number(input.value);
+            if (val !== 1 && Number.isFinite(val)) {
+              weights.sections[id] = val;
+            }
+          });
+
+          document.querySelectorAll('input[data-weight-type="question"]').forEach(function(input) {
+            var id = input.getAttribute('data-weight-id');
+            var val = Number(input.value);
+            if (val !== 1 && Number.isFinite(val)) {
+              weights.questions[id] = val;
+            }
+          });
+
+          return weights;
+        }
+
+        function hasNonDefaultWeights() {
+          var weights = getWeights();
+          return Object.keys(weights.roles).length > 0 ||
+                 Object.keys(weights.sections).length > 0 ||
+                 Object.keys(weights.questions).length > 0;
         }
 
         function getCsvMode() {
@@ -551,25 +681,37 @@
             var roundingActive = byId('csv-rounding-active').checked;
             var roundingDecimals = Number(byId('csv-rounding-decimals').value);
             var mode = getCsvMode();
+            var useWeightages = byId('use-weightages').checked;
 
             if (mode === 'per-subject') {
-              var res = await fetch('/api/normalize/csv-by-subject', {
+              var endpoint = useWeightages ? '/api/normalize/csv-weighted' : '/api/normalize/csv-by-subject';
+              var payload = {
+                csvText: csvText,
+                normalizeToValue: normalizeToValue,
+                scaleLength: 5,
+                startScaleFromZero: false,
+                roundingActive: roundingActive,
+                roundingDecimals: roundingDecimals
+              };
+
+              if (useWeightages) {
+                payload.weights = getWeights();
+              }
+
+              var res = await fetch(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  csvText: csvText,
-                  normalizeToValue: normalizeToValue,
-                  scaleLength: 5,
-                  startScaleFromZero: false,
-                  roundingActive: roundingActive,
-                  roundingDecimals: roundingDecimals
-                })
+                body: JSON.stringify(payload)
               });
               var data = await res.json();
               if (!res.ok) {
                 throw new Error(data.error || 'API error');
               }
-              byId('csv-summary').textContent = data.totalResponseCount + ' responses across ' + data.subjects.length + ' subjects, scale 1-' + data.scaleLength + '.';
+              var summaryText = data.totalResponseCount + ' responses across ' + data.subjects.length + ' subjects, scale 1-' + data.scaleLength + '.';
+              if (useWeightages && hasNonDefaultWeights()) {
+                summaryText += ' (Weighted calculation)';
+              }
+              byId('csv-summary').textContent = summaryText;
               renderPerSubjectResults(data);
             } else {
               var res = await fetch('/api/normalize/csv', {
@@ -679,6 +821,32 @@
           });
 
           setupScaleSelector();
+          setupWeightageToggle();
+        }
+
+        function setupWeightageToggle() {
+          var useWeightagesCheckbox = byId('use-weightages');
+          var weightageInputs = byId('weightage-inputs');
+          var toggleQuestionWeights = byId('toggle-question-weights');
+          var questionWeights = byId('question-weights');
+
+          useWeightagesCheckbox.addEventListener('change', function() {
+            if (useWeightagesCheckbox.checked) {
+              weightageInputs.classList.remove('hidden');
+            } else {
+              weightageInputs.classList.add('hidden');
+            }
+          });
+
+          toggleQuestionWeights.addEventListener('click', function() {
+            if (questionWeights.classList.contains('hidden')) {
+              questionWeights.classList.remove('hidden');
+              toggleQuestionWeights.textContent = 'Hide';
+            } else {
+              questionWeights.classList.add('hidden');
+              toggleQuestionWeights.textContent = 'Show';
+            }
+          });
         }
 
         wireUi();

@@ -35,6 +35,17 @@ export interface ParsedCsvBySubjectResult {
   sections: Array<{ id: string; name: string; questions: Array<{ id: string; text: string }> }>;
 }
 
+export interface CsvStructure {
+  roles: string[];
+  sections: Array<{ id: string; name: string; questions: Array<{ id: string; text: string; scale: number }> }>;
+}
+
+export interface WeightConfig {
+  roles: Record<string, number>;
+  sections: Record<string, number>;
+  questions: Record<string, number>;
+}
+
 interface RatingColumn {
   header: string;
   columnIndex: number;
@@ -198,6 +209,92 @@ export function parseResponsesCsv(csvText: string): ParsedCsvResult {
     responseCount,
     questionScales,
   };
+}
+
+/**
+ * Parse CSV to extract its structure: roles, sections, and questions with scales.
+ * Used to show weightage configuration UI before calculation.
+ */
+export function extractCsvStructure(csvText: string): CsvStructure {
+  const lines = csvText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length < 2) {
+    throw new Error('CSV must have a header row and at least one data row.');
+  }
+
+  const headers = parseCsvLine(lines[0]);
+
+  let relationIdx = -1;
+  for (let i = 0; i < headers.length; i++) {
+    if (headers[i].toLowerCase().trim() === 'relation') {
+      relationIdx = i;
+      break;
+    }
+  }
+
+  const roles = new Set<string>();
+  for (let rowIdx = 1; rowIdx < lines.length; rowIdx++) {
+    const cells = parseCsvLine(lines[rowIdx]);
+    if (relationIdx >= 0 && cells[relationIdx]) {
+      const rel = cells[relationIdx].trim();
+      if (rel) roles.add(rel);
+    }
+  }
+
+  const ratingColumns: RatingColumn[] = [];
+  for (let colIdx = 0; colIdx < headers.length; colIdx++) {
+    const header = headers[colIdx];
+    const outMatch = header.match(OUT_OF_PATTERN);
+    if (!outMatch) continue;
+
+    const scaleLen = Number(outMatch[1]);
+    if (!Number.isFinite(scaleLen) || scaleLen < 1) continue;
+
+    let sectionNum = 1;
+    let questionNum = colIdx + 1;
+    const idxMatch = header.match(QUESTION_INDEX_PATTERN);
+    if (idxMatch) {
+      sectionNum = Number(idxMatch[1]);
+      questionNum = Number(idxMatch[2]);
+    }
+
+    ratingColumns.push({
+      header,
+      columnIndex: colIdx,
+      scaleLength: scaleLen,
+      sectionNum,
+      questionNum,
+    });
+  }
+
+  const sectionMap = new Map<number, { id: string; name: string; questions: Array<{ id: string; text: string; scale: number }> }>();
+  for (const col of ratingColumns) {
+    const sid = `S${col.sectionNum}`;
+    if (!sectionMap.has(col.sectionNum)) {
+      sectionMap.set(col.sectionNum, { id: sid, name: `Section ${col.sectionNum}`, questions: [] });
+    }
+    const sec = sectionMap.get(col.sectionNum)!;
+    const qid = `S${col.sectionNum}_Q${col.questionNum}`;
+    const questionText = col.header.replace(OUT_OF_PATTERN, '').replace(QUESTION_INDEX_PATTERN, '').trim() || col.header;
+    if (!sec.questions.some((q) => q.id === qid)) {
+      sec.questions.push({ id: qid, text: questionText, scale: col.scaleLength });
+    }
+  }
+
+  const sections = Array.from(sectionMap.entries())
+    .sort(([a], [b]) => a - b)
+    .map(([, s]) => s);
+
+  const sortedRoles = Array.from(roles).sort((a, b) => {
+    const order = ['Self', 'Manager', 'Peer', 'Reportee'];
+    const aIdx = order.indexOf(a);
+    const bIdx = order.indexOf(b);
+    if (aIdx === -1 && bIdx === -1) return a.localeCompare(b);
+    if (aIdx === -1) return 1;
+    if (bIdx === -1) return -1;
+    return aIdx - bIdx;
+  });
+
+  return { roles: sortedRoles, sections };
 }
 
 interface CsvMetaColumns {
@@ -478,6 +575,346 @@ export function parseResponsesCsvBySubject(
 
     const overallSc = mean(allIndividualScores);
     const overallPct = mean(allIndividualPcts);
+
+    subjects.push({
+      subjectName: subj.name,
+      subjectEmail: subj.email,
+      relationships: sortedRelationships,
+      overallSections,
+      overallSummary: {
+        overallAveragePercentage: options.roundingActive ? roundTo(overallPct, options.roundingDecimals) : overallPct,
+        overallAverageScore: options.roundingActive ? roundTo(overallSc, options.roundingDecimals) : overallSc,
+      },
+    });
+  }
+
+  subjects.sort((a, b) => a.subjectName.localeCompare(b.subjectName));
+
+  return {
+    subjects,
+    scaleLength,
+    totalResponseCount: rows.length,
+    sections,
+  };
+}
+
+export interface WeightedNormalizationOptions extends NormalizationOptions {
+  weights: WeightConfig;
+}
+
+/**
+ * Parse CSV and compute weighted normalized scores per subject.
+ * Weights are multipliers (default 1) for roles, sections, and questions.
+ * Combined weight = roleWeight × sectionWeight × questionWeight
+ * Final score = sum(score × combinedWeight) / sum(combinedWeight)
+ */
+export function parseResponsesCsvBySubjectWeighted(
+  csvText: string,
+  options: WeightedNormalizationOptions
+): ParsedCsvBySubjectResult {
+  const lines = csvText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length < 2) {
+    throw new Error('CSV must have a header row and at least one data row.');
+  }
+
+  const headers = parseCsvLine(lines[0]);
+  const meta = findMetaColumns(headers);
+
+  if (meta.subjectNameIdx === -1 && meta.subjectEmailIdx === -1) {
+    throw new Error('CSV must have a "SubjectName" or "SubjectEmail" column.');
+  }
+  if (meta.relationIdx === -1) {
+    throw new Error('CSV must have a "Relation" column.');
+  }
+
+  const ratingColumns: RatingColumn[] = [];
+  for (let colIdx = 0; colIdx < headers.length; colIdx++) {
+    const header = headers[colIdx];
+    const outMatch = header.match(OUT_OF_PATTERN);
+    if (!outMatch) continue;
+
+    const scaleLen = Number(outMatch[1]);
+    if (!Number.isFinite(scaleLen) || scaleLen < 1) continue;
+
+    let sectionNum = 1;
+    let questionNum = colIdx + 1;
+    const idxMatch = header.match(QUESTION_INDEX_PATTERN);
+    if (idxMatch) {
+      sectionNum = Number(idxMatch[1]);
+      questionNum = Number(idxMatch[2]);
+    }
+
+    ratingColumns.push({
+      header,
+      columnIndex: colIdx,
+      scaleLength: scaleLen,
+      sectionNum,
+      questionNum,
+    });
+  }
+
+  if (ratingColumns.length === 0) {
+    throw new Error(
+      'No rating columns found. Expect headers like "1.1 - Question (Out of 5)".'
+    );
+  }
+
+  const scaleLength = options.scaleLength || Math.max(...ratingColumns.map((c) => c.scaleLength), 5);
+
+  const questionScaleMap = new Map<string, number>();
+  const questionToSection = new Map<string, string>();
+  const sectionMap = new Map<number, { id: string; name: string; questions: Array<{ id: string; text: string }> }>();
+  
+  for (const col of ratingColumns) {
+    const sid = `S${col.sectionNum}`;
+    if (!sectionMap.has(col.sectionNum)) {
+      sectionMap.set(col.sectionNum, { id: sid, name: `Section ${col.sectionNum}`, questions: [] });
+    }
+    const sec = sectionMap.get(col.sectionNum)!;
+    const qid = `S${col.sectionNum}_Q${col.questionNum}`;
+    const questionText = col.header.replace(OUT_OF_PATTERN, '').replace(QUESTION_INDEX_PATTERN, '').trim() || col.header;
+    if (!sec.questions.some((q) => q.id === qid)) {
+      sec.questions.push({ id: qid, text: questionText });
+    }
+    questionScaleMap.set(qid, col.scaleLength);
+    questionToSection.set(qid, sid);
+  }
+  
+  const sections = Array.from(sectionMap.entries())
+    .sort(([a], [b]) => a - b)
+    .map(([, s]) => s);
+
+  const { weights } = options;
+  const getWeight = (role: string, sectionId: string, questionId: string): number => {
+    const roleW = weights.roles[role] ?? 1;
+    const secW = weights.sections[sectionId] ?? 1;
+    const qW = weights.questions[questionId] ?? 1;
+    return roleW * secW * qW;
+  };
+
+  type RowData = {
+    subjectKey: string;
+    subjectName: string;
+    subjectEmail: string;
+    relation: string;
+    evaluator: string;
+    ratings: Map<string, number>;
+  };
+
+  const rows: RowData[] = [];
+  for (let rowIdx = 1; rowIdx < lines.length; rowIdx++) {
+    const cells = parseCsvLine(lines[rowIdx]);
+    const subjectName = meta.subjectNameIdx >= 0 ? (cells[meta.subjectNameIdx] || '').trim() : '';
+    const subjectEmail = meta.subjectEmailIdx >= 0 ? (cells[meta.subjectEmailIdx] || '').trim() : '';
+    const relation = (cells[meta.relationIdx] || '').trim();
+    const evaluator = meta.evaluatorNameIdx >= 0 ? (cells[meta.evaluatorNameIdx] || '').trim() : '';
+
+    if (!subjectName && !subjectEmail) continue;
+    if (!relation) continue;
+
+    const subjectKey = subjectEmail || subjectName;
+    const ratings = new Map<string, number>();
+    for (const col of ratingColumns) {
+      const raw = cells[col.columnIndex];
+      if (isSkippedValue(raw) || !isNumeric(raw)) continue;
+      const qid = `S${col.sectionNum}_Q${col.questionNum}`;
+      ratings.set(qid, Number(raw));
+    }
+
+    rows.push({ subjectKey, subjectName, subjectEmail, relation, evaluator, ratings });
+  }
+
+  const subjectMap = new Map<string, { name: string; email: string; rowsByRelation: Map<string, RowData[]> }>();
+  for (const row of rows) {
+    if (!subjectMap.has(row.subjectKey)) {
+      subjectMap.set(row.subjectKey, {
+        name: row.subjectName,
+        email: row.subjectEmail,
+        rowsByRelation: new Map(),
+      });
+    }
+    const subj = subjectMap.get(row.subjectKey)!;
+    if (!subj.rowsByRelation.has(row.relation)) {
+      subj.rowsByRelation.set(row.relation, []);
+    }
+    subj.rowsByRelation.get(row.relation)!.push(row);
+  }
+
+  function normalizeValue(raw: number, questionId: string): { percentage: number; score: number } {
+    const qScale = questionScaleMap.get(questionId) || scaleLength;
+    const pct = (raw / qScale) * 100;
+    const sc = (raw / qScale) * options.normalizeToValue;
+    if (options.roundingActive) {
+      return {
+        percentage: roundTo(pct, options.roundingDecimals),
+        score: roundTo(sc, options.roundingDecimals),
+      };
+    }
+    return { percentage: pct, score: sc };
+  }
+
+  function computeSectionsFromRatings(
+    questionAvgs: Map<string, number>
+  ): NormalizedSectionResult[] {
+    const result: NormalizedSectionResult[] = [];
+    for (const sec of sections) {
+      const questions = sec.questions
+        .filter((q) => questionAvgs.has(q.id))
+        .map((q) => {
+          const rawVal = questionAvgs.get(q.id)!;
+          const { percentage, score } = normalizeValue(rawVal, q.id);
+          return {
+            questionId: q.id,
+            sectionId: sec.id,
+            questionText: q.text,
+            rawValue: options.roundingActive ? roundTo(rawVal, options.roundingDecimals) : rawVal,
+            percentage,
+            score,
+          };
+        });
+      if (questions.length === 0) continue;
+      const avgPct = mean(questions.map((q) => q.percentage));
+      const avgSc = mean(questions.map((q) => q.score));
+      result.push({
+        sectionId: sec.id,
+        sectionName: sec.name,
+        questions,
+        averagePercentage: options.roundingActive ? roundTo(avgPct, options.roundingDecimals) : avgPct,
+        averageScore: options.roundingActive ? roundTo(avgSc, options.roundingDecimals) : avgSc,
+      });
+    }
+    return result;
+  }
+
+  const subjects: SubjectResult[] = [];
+  for (const [, subj] of subjectMap) {
+    const relationships: RelationshipResult[] = [];
+    
+    let weightedScoreSum = 0;
+    let weightedPctSum = 0;
+    let totalWeight = 0;
+
+    for (const [relation, relRows] of subj.rowsByRelation) {
+      const questionValues = new Map<string, number[]>();
+      
+      for (const row of relRows) {
+        for (const [qid, val] of row.ratings) {
+          if (!questionValues.has(qid)) questionValues.set(qid, []);
+          questionValues.get(qid)!.push(val);
+
+          const sectionId = questionToSection.get(qid) || 'S1';
+          const weight = getWeight(relation, sectionId, qid);
+          const { percentage, score } = normalizeValue(val, qid);
+          
+          weightedScoreSum += score * weight;
+          weightedPctSum += percentage * weight;
+          totalWeight += weight;
+        }
+      }
+
+      const questionAvgs = new Map<string, number>();
+      for (const [qid, vals] of questionValues) {
+        questionAvgs.set(qid, mean(vals));
+      }
+
+      const sectionResults = computeSectionsFromRatings(questionAvgs);
+      const allQs = sectionResults.flatMap((s) => s.questions);
+      const overallPct = mean(allQs.map((q) => q.percentage));
+      const overallSc = mean(allQs.map((q) => q.score));
+
+      relationships.push({
+        relation,
+        evaluatorCount: relRows.length,
+        sections: sectionResults,
+        summary: {
+          overallAveragePercentage: options.roundingActive ? roundTo(overallPct, options.roundingDecimals) : overallPct,
+          overallAverageScore: options.roundingActive ? roundTo(overallSc, options.roundingDecimals) : overallSc,
+        },
+      });
+    }
+
+    const sortedRelationships = relationships.sort((a, b) => {
+      const order = ['Self', 'Manager', 'Peer', 'Reportee'];
+      return order.indexOf(a.relation) - order.indexOf(b.relation);
+    });
+
+    // Compute weighted section averages using hierarchical approach:
+    // 1. For each question: role-weighted average across all evaluators
+    // 2. For each section: question-weighted average of question averages
+    const allSubjectRows = Array.from(subj.rowsByRelation.values()).flat();
+    
+    const overallSections: NormalizedSectionResult[] = [];
+    for (const sec of sections) {
+      const questionResults: Array<{
+        questionId: string;
+        sectionId: string;
+        questionText: string;
+        rawValue: number;
+        percentage: number;
+        score: number;
+      }> = [];
+      
+      for (const q of sec.questions) {
+        const qid = q.id;
+        let roleWeightedSum = 0;
+        let roleWeightTotal = 0;
+        
+        // Compute role-weighted average for this question across all evaluators
+        for (const row of allSubjectRows) {
+          const rawVal = row.ratings.get(qid);
+          if (rawVal === undefined) continue;
+          
+          const roleW = weights.roles[row.relation] ?? 1;
+          const { score } = normalizeValue(rawVal, qid);
+          roleWeightedSum += score * roleW;
+          roleWeightTotal += roleW;
+        }
+        
+        if (roleWeightTotal > 0) {
+          const qAvgScore = roleWeightedSum / roleWeightTotal;
+          const qScale = questionScaleMap.get(qid) || scaleLength;
+          const qAvgRaw = (qAvgScore / options.normalizeToValue) * qScale;
+          const qAvgPct = (qAvgScore / options.normalizeToValue) * 100;
+          
+          questionResults.push({
+            questionId: qid,
+            sectionId: sec.id,
+            questionText: q.text,
+            rawValue: options.roundingActive ? roundTo(qAvgRaw, options.roundingDecimals) : qAvgRaw,
+            percentage: options.roundingActive ? roundTo(qAvgPct, options.roundingDecimals) : qAvgPct,
+            score: options.roundingActive ? roundTo(qAvgScore, options.roundingDecimals) : qAvgScore,
+          });
+        }
+      }
+      
+      if (questionResults.length === 0) continue;
+      
+      // Compute question-weighted section average
+      let qWeightedScoreSum = 0;
+      let qWeightedPctSum = 0;
+      let qWeightTotal = 0;
+      
+      for (const qr of questionResults) {
+        const qW = weights.questions[qr.questionId] ?? 1;
+        qWeightedScoreSum += qr.score * qW;
+        qWeightedPctSum += qr.percentage * qW;
+        qWeightTotal += qW;
+      }
+      
+      const sectionAvgScore = qWeightTotal > 0 ? qWeightedScoreSum / qWeightTotal : 0;
+      const sectionAvgPct = qWeightTotal > 0 ? qWeightedPctSum / qWeightTotal : 0;
+      
+      overallSections.push({
+        sectionId: sec.id,
+        sectionName: sec.name,
+        questions: questionResults,
+        averagePercentage: options.roundingActive ? roundTo(sectionAvgPct, options.roundingDecimals) : sectionAvgPct,
+        averageScore: options.roundingActive ? roundTo(sectionAvgScore, options.roundingDecimals) : sectionAvgScore,
+      });
+    }
+
+    const overallSc = totalWeight > 0 ? weightedScoreSum / totalWeight : 0;
+    const overallPct = totalWeight > 0 ? weightedPctSum / totalWeight : 0;
 
     subjects.push({
       subjectName: subj.name,

@@ -425,6 +425,10 @@ export function parseResponsesCsvBySubject(
         for (const [qid, val] of row.ratings) {
           if (!questionValues.has(qid)) questionValues.set(qid, []);
           questionValues.get(qid)!.push(val);
+
+          const { percentage, score } = normalizeValue(val, qid);
+          allIndividualScores.push(score);
+          allIndividualPcts.push(percentage);
         }
       }
 
@@ -437,11 +441,6 @@ export function parseResponsesCsvBySubject(
       const allQs = sectionResults.flatMap((s) => s.questions);
       const overallPct = mean(allQs.map((q) => q.percentage));
       const overallSc = mean(allQs.map((q) => q.score));
-
-      allQs.forEach((q) => {
-        allIndividualScores.push(q.score);
-        allIndividualPcts.push(q.percentage);
-      });
 
       relationships.push({
         relation,

@@ -199,7 +199,9 @@ const server = http.createServer(async (req, res) => {
   createReadStream(pathToServe).pipe(res);
 });
 
-server.listen(port, '127.0.0.1', () => {
-  process.stdout.write(`Serving ${publicDir} at http://127.0.0.1:${port}\n`);
-  process.stdout.write(`API endpoints available at http://127.0.0.1:${port}/api/normalize/*\n`);
+const host = process.env.PORT ? '0.0.0.0' : '127.0.0.1';
+server.listen(port, host, () => {
+  const url = `http://${host === '0.0.0.0' ? 'localhost' : host}:${port}`;
+  process.stdout.write(`Serving ${publicDir} at ${url}\n`);
+  process.stdout.write(`API endpoints available at ${url}/api/normalize/*\n`);
 });

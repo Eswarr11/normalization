@@ -501,7 +501,8 @@
             });
             var data = await res.json();
             if (!res.ok) {
-              throw new Error(data.error || 'API error');
+              showError(data.error || 'API error');
+              return;
             }
             renderResults(data);
           } catch (e) {
@@ -527,7 +528,8 @@
             });
             var data = await res.json();
             if (!res.ok) {
-              throw new Error(data.error || 'API error');
+              showError(data.error || 'API error');
+              return;
             }
             renderResults(data);
           } catch (e) {
@@ -564,7 +566,9 @@
               });
               var data = await res.json();
               if (!res.ok) {
-                throw new Error(data.error || 'Failed to analyze CSV');
+                showError(data.error || 'Failed to analyze CSV');
+                byId('csv-summary').textContent = 'File loaded. Click "Calculate from CSV" to process.';
+                return;
               }
               csvStructure = data;
               renderWeightageConfig(csvStructure);
@@ -705,7 +709,8 @@
               });
               var data = await res.json();
               if (!res.ok) {
-                throw new Error(data.error || 'API error');
+                showError(data.error || 'API error');
+                return;
               }
               var summaryText = data.totalResponseCount + ' responses across ' + data.subjects.length + ' subjects, scale 1-' + data.scaleLength + '.';
               if (useWeightages && hasNonDefaultWeights()) {
@@ -726,7 +731,8 @@
               });
               var data = await res.json();
               if (!res.ok) {
-                throw new Error(data.error || 'API error');
+                showError(data.error || 'API error');
+                return;
               }
               byId('csv-summary').textContent = data.responseCount + ' responses processed, scale 1-' + data.scaleLength + '.';
               renderResults(data);

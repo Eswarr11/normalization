@@ -6,6 +6,17 @@ const publicDir = resolve(process.cwd(), 'public');
 const distDir = resolve(process.cwd(), 'dist');
 const port = Number(process.env.PORT ?? 5173);
 
+let loggerModule = null;
+async function loadLogger() {
+  if (!loggerModule) {
+    const loggerPath = join(distDir, 'src', 'logger.js');
+    if (existsSync(loggerPath)) {
+      loggerModule = await import(loggerPath);
+    }
+  }
+  return loggerModule;
+}
+
 const contentTypes = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
@@ -61,11 +72,20 @@ function sendJson(res, statusCode, data) {
   res.end(JSON.stringify(data));
 }
 
-async function handleApiRequest(req, res) {
+async function handleApiRequest(req, res, loggerMod) {
   const url = req.url.split('?')[0];
 
+  const sendError = (statusCode, message) => {
+    const payload = { error: message };
+    if (loggerMod?.getCurrentTraceId) {
+      const tid = loggerMod.getCurrentTraceId();
+      if (tid) payload.traceId = tid;
+    }
+    sendJson(res, statusCode, payload);
+  };
+
   if (req.method !== 'POST') {
-    sendJson(res, 405, { error: 'Method not allowed' });
+    sendError(405, 'Method not allowed');
     return;
   }
 
@@ -75,12 +95,12 @@ async function handleApiRequest(req, res) {
 
     if (url === '/api/normalize/manual') {
       if (!serviceModule) {
-        sendJson(res, 500, { error: 'Service module not loaded. Run npm run build first.' });
+        sendError(500, 'Service module not loaded. Run npm run build first.');
         return;
       }
       const { config, response } = body;
       if (!config || !response) {
-        sendJson(res, 400, { error: 'Missing config or response in request body' });
+        sendError(400, 'Missing config or response in request body');
         return;
       }
       const result = serviceModule.normalizeFromManualConfig(config, response);
@@ -90,12 +110,12 @@ async function handleApiRequest(req, res) {
 
     if (url === '/api/normalize/api') {
       if (!serviceModule) {
-        sendJson(res, 500, { error: 'Service module not loaded. Run npm run build first.' });
+        sendError(500, 'Service module not loaded. Run npm run build first.');
         return;
       }
       const { surveyJson, responses } = body;
       if (!surveyJson || !responses) {
-        sendJson(res, 400, { error: 'Missing surveyJson or responses in request body' });
+        sendError(400, 'Missing surveyJson or responses in request body');
         return;
       }
       const surveyResponse = Array.isArray(responses)
@@ -108,12 +128,12 @@ async function handleApiRequest(req, res) {
 
     if (url === '/api/normalize/csv') {
       if (!csvParserModule || !serviceModule) {
-        sendJson(res, 500, { error: 'Modules not loaded. Run npm run build first.' });
+        sendError(500, 'Modules not loaded. Run npm run build first.');
         return;
       }
       const { csvText, normalizeToValue, roundingActive, roundingDecimals } = body;
       if (!csvText) {
-        sendJson(res, 400, { error: 'Missing csvText in request body' });
+        sendError(400, 'Missing csvText in request body');
         return;
       }
       const parsed = csvParserModule.parseResponsesCsv(csvText);
@@ -137,12 +157,12 @@ async function handleApiRequest(req, res) {
 
     if (url === '/api/normalize/csv-by-subject') {
       if (!csvParserModule) {
-        sendJson(res, 500, { error: 'CSV parser module not loaded. Run npm run build first.' });
+        sendError(500, 'CSV parser module not loaded. Run npm run build first.');
         return;
       }
       const { csvText, normalizeToValue, roundingActive, roundingDecimals, scaleLength, startScaleFromZero } = body;
       if (!csvText) {
-        sendJson(res, 400, { error: 'Missing csvText in request body' });
+        sendError(400, 'Missing csvText in request body');
         return;
       }
       const options = {
@@ -159,12 +179,12 @@ async function handleApiRequest(req, res) {
 
     if (url === '/api/csv/structure') {
       if (!csvParserModule) {
-        sendJson(res, 500, { error: 'CSV parser module not loaded. Run npm run build first.' });
+        sendError(500, 'CSV parser module not loaded. Run npm run build first.');
         return;
       }
       const { csvText } = body;
       if (!csvText) {
-        sendJson(res, 400, { error: 'Missing csvText in request body' });
+        sendError(400, 'Missing csvText in request body');
         return;
       }
       const structure = csvParserModule.extractCsvStructure(csvText);
@@ -174,12 +194,12 @@ async function handleApiRequest(req, res) {
 
     if (url === '/api/normalize/csv-weighted') {
       if (!csvParserModule) {
-        sendJson(res, 500, { error: 'CSV parser module not loaded. Run npm run build first.' });
+        sendError(500, 'CSV parser module not loaded. Run npm run build first.');
         return;
       }
       const { csvText, normalizeToValue, roundingActive, roundingDecimals, scaleLength, startScaleFromZero, weights } = body;
       if (!csvText) {
-        sendJson(res, 400, { error: 'Missing csvText in request body' });
+        sendError(400, 'Missing csvText in request body');
         return;
       }
       const options = {
@@ -198,7 +218,7 @@ async function handleApiRequest(req, res) {
     if (url === '/api/normalize/surveysparrow') {
       const { surveySettings, responses, normalizeToValue, roundingActive, roundingDecimals } = body;
       if (!responses || !Array.isArray(responses)) {
-        sendJson(res, 400, { error: 'Missing or invalid responses array in request body' });
+        sendError(400, 'Missing or invalid responses array in request body');
         return;
       }
 
@@ -410,9 +430,18 @@ async function handleApiRequest(req, res) {
       return;
     }
 
-    sendJson(res, 404, { error: 'API endpoint not found' });
+    sendError(404, 'API endpoint not found');
   } catch (e) {
-    sendJson(res, 500, { error: e.message || String(e) });
+    if (loggerMod?.logger) {
+      loggerMod.logger.error('API request failed', e);
+    }
+    const message = e.message || String(e);
+    const payload = { error: message };
+    if (loggerMod?.getCurrentTraceId) {
+      const tid = loggerMod.getCurrentTraceId();
+      if (tid) payload.traceId = tid;
+    }
+    sendJson(res, 500, payload);
   }
 }
 
@@ -428,7 +457,9 @@ const server = http.createServer(async (req, res) => {
   const url = req.url.split('?')[0];
 
   if (url.startsWith('/api/')) {
-    await handleApiRequest(req, res);
+    const loggerMod = await loadLogger();
+    const runWithTrace = loggerMod?.runWithTrace ?? ((fn) => fn());
+    await runWithTrace(() => handleApiRequest(req, res, loggerMod));
     return;
   }
 

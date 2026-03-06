@@ -10,6 +10,7 @@ export interface ParsedCsvResult {
   response: SurveyResponse;
   scaleLength: number;
   responseCount: number;
+  questionScales: Map<string, number>;
 }
 
 export interface RelationshipResult {
@@ -113,6 +114,7 @@ export function parseResponsesCsv(csvText: string): ParsedCsvResult {
 
   const scaleLength = Math.max(...ratingColumns.map((c) => c.scaleLength), 5);
 
+  const questionScales = new Map<string, number>();
   const sectionMap = new Map<number, { id: string; name: string; questions: Array<{ id: string; text: string }> }>();
 
   for (const col of ratingColumns) {
@@ -128,6 +130,7 @@ export function parseResponsesCsv(csvText: string): ParsedCsvResult {
     const qid = `S${col.sectionNum}_Q${col.questionNum}`;
     const questionText = col.header.replace(OUT_OF_PATTERN, '').replace(QUESTION_INDEX_PATTERN, '').trim() || col.header;
     sec.questions.push({ id: qid, text: questionText });
+    questionScales.set(qid, col.scaleLength);
   }
 
   const sections = Array.from(sectionMap.entries())
@@ -183,6 +186,7 @@ export function parseResponsesCsv(csvText: string): ParsedCsvResult {
     response: { responses },
     scaleLength,
     responseCount,
+    questionScales,
   };
 }
 
@@ -285,8 +289,8 @@ export function parseResponsesCsvBySubject(
   }
 
   const scaleLength = options.scaleLength || Math.max(...ratingColumns.map((c) => c.scaleLength), 5);
-  const scaleMax = scaleLength;
 
+  const questionScaleMap = new Map<string, number>();
   const sectionMap = new Map<number, { id: string; name: string; questions: Array<{ id: string; text: string }> }>();
   for (const col of ratingColumns) {
     const sid = `S${col.sectionNum}`;
@@ -299,6 +303,7 @@ export function parseResponsesCsvBySubject(
     if (!sec.questions.some((q) => q.id === qid)) {
       sec.questions.push({ id: qid, text: questionText });
     }
+    questionScaleMap.set(qid, col.scaleLength);
   }
   const sections = Array.from(sectionMap.entries())
     .sort(([a], [b]) => a - b)
@@ -352,9 +357,10 @@ export function parseResponsesCsvBySubject(
     subj.rowsByRelation.get(row.relation)!.push(row);
   }
 
-  function normalizeValue(raw: number): { percentage: number; score: number } {
-    const pct = (raw / scaleMax) * 100;
-    const sc = (raw / scaleMax) * options.normalizeToValue;
+  function normalizeValue(raw: number, questionId: string): { percentage: number; score: number } {
+    const qScale = questionScaleMap.get(questionId) || scaleLength;
+    const pct = (raw / qScale) * 100;
+    const sc = (raw / qScale) * options.normalizeToValue;
     if (options.roundingActive) {
       return {
         percentage: roundTo(pct, options.roundingDecimals),
@@ -371,7 +377,7 @@ export function parseResponsesCsvBySubject(
     for (const sec of sections) {
       const questions = sec.questions.map((q) => {
         const rawVal = questionAvgs.get(q.id) ?? 0;
-        const { percentage, score } = normalizeValue(rawVal);
+        const { percentage, score } = normalizeValue(rawVal, q.id);
         return {
           questionId: q.id,
           sectionId: sec.id,

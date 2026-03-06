@@ -9,12 +9,14 @@ import type {
   SurveyResponse,
 } from './types.js';
 
-function buildDefaultRatingScale(
+function buildRatingScale(
   questionId: string,
-  settings: SurveyModel['normalizationSettings']
+  settings: SurveyModel['normalizationSettings'],
+  questionScales?: Record<string, number>
 ): RatingScale {
   const min = settings.startScaleFromZero ? 0 : 1;
-  const max = min + settings.scaleLength - 1;
+  const questionScale = questionScales?.[questionId];
+  const max = questionScale !== undefined ? questionScale : min + settings.scaleLength - 1;
   return { questionId, min, max };
 }
 
@@ -27,7 +29,7 @@ function manualConfigToSurveyModel(config: ManualSurveyConfig): SurveyModel {
       sectionId: s.id,
       text: q.text,
       type: 'OpinionScale',
-      ratingScale: buildDefaultRatingScale(q.id, config.normalizationSettings),
+      ratingScale: buildRatingScale(q.id, config.normalizationSettings, config.questionScales),
     })),
   }));
 

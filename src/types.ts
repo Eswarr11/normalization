@@ -131,5 +131,6 @@ export interface ManualSurveyConfig {
       text: string;
     }>;
   }>;
+  questionScales?: Record<string, number>;
 }
 

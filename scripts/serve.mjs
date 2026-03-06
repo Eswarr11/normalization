@@ -117,6 +117,7 @@ async function handleApiRequest(req, res) {
         return;
       }
       const parsed = csvParserModule.parseResponsesCsv(csvText);
+      const questionScalesObj = Object.fromEntries(parsed.questionScales);
       const config = {
         ...parsed.config,
         normalizationSettings: {
@@ -127,6 +128,7 @@ async function handleApiRequest(req, res) {
             value: Number.isFinite(roundingDecimals) ? roundingDecimals : 1,
           },
         },
+        questionScales: questionScalesObj,
       };
       const result = serviceModule.normalizeFromManualConfig(config, parsed.response);
       sendJson(res, 200, { ...result, responseCount: parsed.responseCount, scaleLength: parsed.scaleLength });

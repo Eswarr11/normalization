@@ -1,0 +1,688 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Normalization Calculator</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="container">
+      <header class="header">
+        <h1>Normalization Calculator</h1>
+        <p class="muted">
+          Compute per-question percentage (0-100) and normalized score (0-normalizeToValue), plus section and overall averages.
+        </p>
+      </header>
+
+      <div class="tabs">
+        <button id="tab-manual" class="tab tab--active" type="button">Manual</button>
+        <button id="tab-api" class="tab" type="button">API</button>
+        <button id="tab-csv" class="tab" type="button">Upload CSV</button>
+      </div>
+
+      <main class="grid">
+        <section id="panel-manual" class="panel panel--active">
+          <h2>Manual Mode</h2>
+
+          <div class="form">
+            <div class="row">
+              <label>
+                Survey name
+                <input id="manual-survey-name" type="text" value="Manual Survey" />
+              </label>
+              <label>
+                Scale length
+                <input id="manual-scale-length" type="number" value="5" min="2" />
+              </label>
+              <label>
+                Normalize to value
+                <input id="manual-normalize-to" type="number" value="5" min="1" />
+              </label>
+            </div>
+
+            <div class="row">
+              <label class="checkbox">
+                <input id="manual-start-zero" type="checkbox" />
+                Start scale from zero
+              </label>
+              <label class="checkbox">
+                <input id="manual-rounding-active" type="checkbox" checked />
+                Round results
+              </label>
+              <label>
+                Rounding decimals
+                <input id="manual-rounding-decimals" type="number" value="1" min="0" />
+              </label>
+            </div>
+
+            <div class="row">
+              <label>
+                Number of sections
+                <input id="manual-sections-count" type="number" value="2" min="1" />
+              </label>
+              <label>
+                Questions per section
+                <input id="manual-questions-per-section" type="number" value="3" min="1" />
+              </label>
+              <div class="actions">
+                <button id="manual-generate" type="button">Generate Inputs</button>
+              </div>
+            </div>
+
+            <div id="manual-generated" class="generated"></div>
+
+            <div class="actions actions--block">
+              <button id="manual-calc" type="button">Calculate</button>
+            </div>
+          </div>
+        </section>
+
+        <section id="panel-api" class="panel">
+          <h2>API Mode</h2>
+
+          <div class="form">
+            <label>
+              Survey JSON (paste API response)
+              <textarea id="api-survey-json" rows="10" spellcheck="false"></textarea>
+            </label>
+
+            <label>
+              Responses JSON (array of {"questionId","value"} or object map)
+              <textarea id="api-responses-json" rows="6" spellcheck="false"></textarea>
+            </label>
+
+            <div class="actions actions--block">
+              <button id="api-calc" type="button">Calculate</button>
+            </div>
+          </div>
+        </section>
+
+        <section id="panel-csv" class="panel">
+          <h2>Upload Responses CSV</h2>
+          <p class="muted" style="margin-bottom: 12px;">
+            Upload a survey responses CSV (e.g. from SurveySparrow). Rating columns like "1.1 - ... (Out of 5)" are detected automatically.
+          </p>
+          <div class="form">
+            <div class="csv-upload-zone" id="csv-upload-zone" tabindex="0" role="button">
+              <input type="file" id="csv-file-input" accept=".csv" />
+              <span id="csv-upload-label">Drop CSV here or click to browse</span>
+              <div id="csv-summary" class="csv-summary hidden"></div>
+            </div>
+            <div class="scale-selector">
+              <label>Normalize to</label>
+              <div class="scale-options">
+                <button type="button" class="scale-btn scale-btn--active" data-value="5">5 Point</button>
+                <button type="button" class="scale-btn" data-value="10">10 Point</button>
+                <button type="button" class="scale-btn" data-value="custom">Custom</button>
+              </div>
+              <div class="scale-custom-wrap hidden" id="scale-custom-wrap">
+                <input type="number" id="csv-normalize-to" value="5" min="1" max="100" placeholder="Enter value (1-100)" />
+              </div>
+            </div>
+            <div class="row" style="margin-top: 14px;">
+              <label class="checkbox">
+                <input id="csv-rounding-active" type="checkbox" checked />
+                Round results
+              </label>
+              <label>
+                Rounding decimals
+                <input id="csv-rounding-decimals" type="number" value="1" min="0" />
+              </label>
+            </div>
+            <div class="row" style="margin-top: 8px;">
+              <label class="radio-group">
+                <span style="font-weight: 600; margin-bottom: 6px; display: block;">Output mode</span>
+                <label class="radio-label">
+                  <input type="radio" name="csv-mode" value="aggregate" checked />
+                  Aggregate all responses
+                </label>
+                <label class="radio-label">
+                  <input type="radio" name="csv-mode" value="per-subject" />
+                  Per-subject breakdown (by relationship)
+                </label>
+              </label>
+            </div>
+            <div class="actions actions--block">
+              <button id="csv-calc" type="button" disabled>Calculate from CSV</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel panel--always-visible">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+            <h2 style="margin: 0;">Results</h2>
+            <button id="download-json" type="button" class="btn-secondary hidden">Download JSON</button>
+          </div>
+          <div id="error" class="error hidden"></div>
+          <div id="results"></div>
+        </section>
+      </main>
+    </div>
+
+    <script>
+      (function() {
+        'use strict';
+
+        var csvText = null;
+        var lastResultData = null;
+
+        function byId(id) {
+          var el = document.getElementById(id);
+          if (!el) throw new Error('Missing element #' + id);
+          return el;
+        }
+
+        function showError(message) {
+          var errorEl = byId('error');
+          errorEl.textContent = message;
+          errorEl.classList.remove('hidden');
+        }
+
+        function clearError() {
+          var errorEl = byId('error');
+          errorEl.textContent = '';
+          errorEl.classList.add('hidden');
+        }
+
+        function showDownloadButton(data) {
+          lastResultData = data;
+          byId('download-json').classList.remove('hidden');
+        }
+
+        function hideDownloadButton() {
+          lastResultData = null;
+          byId('download-json').classList.add('hidden');
+        }
+
+        function downloadJson() {
+          if (!lastResultData) return;
+          var blob = new Blob([JSON.stringify(lastResultData, null, 2)], { type: 'application/json' });
+          var url = URL.createObjectURL(blob);
+          var a = document.createElement('a');
+          a.href = url;
+          a.download = 'normalization-results.json';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        }
+
+        function setActiveTab(tab) {
+          var tabs = ['manual', 'api', 'csv'];
+          tabs.forEach(function(t) {
+            var tabBtn = byId('tab-' + t);
+            var panel = byId('panel-' + t);
+            if (t === tab) {
+              tabBtn.classList.add('tab--active');
+              panel.classList.add('panel--active');
+            } else {
+              tabBtn.classList.remove('tab--active');
+              panel.classList.remove('panel--active');
+            }
+          });
+        }
+
+        function escapeHtml(input) {
+          return String(input)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+        }
+
+        function renderSections(sections) {
+          var rows = [];
+          sections.forEach(function(section) {
+            rows.push(
+              '<div style="margin: 10px 0 6px 0;">' +
+              '<span class="pill"><strong>Section</strong>: ' + escapeHtml(section.sectionName) + '</span> ' +
+              '<span class="pill"><strong>Avg %</strong>: ' + section.averagePercentage + '</span> ' +
+              '<span class="pill"><strong>Avg score</strong>: ' + section.averageScore + '</span>' +
+              '</div>'
+            );
+
+            rows.push(
+              '<table class="resultsTable">' +
+              '<thead><tr>' +
+              '<th style="width: 45%;">Question</th>' +
+              '<th>Raw</th>' +
+              '<th>%</th>' +
+              '<th>Score</th>' +
+              '</tr></thead><tbody>'
+            );
+
+            section.questions.forEach(function(q) {
+              rows.push(
+                '<tr>' +
+                '<td>' + escapeHtml(q.questionText) + '</td>' +
+                '<td>' + q.rawValue + '</td>' +
+                '<td>' + q.percentage + '</td>' +
+                '<td>' + q.score + '</td>' +
+                '</tr>'
+              );
+            });
+
+            rows.push('</tbody></table>');
+          });
+          return rows.join('');
+        }
+
+        function renderResults(result) {
+          var container = byId('results');
+          var rows = [];
+
+          rows.push(
+            '<div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:10px;">' +
+            '<span class="pill"><strong>Overall %</strong>: ' + result.summary.overallAveragePercentage + '</span>' +
+            '<span class="pill"><strong>Overall score</strong>: ' + result.summary.overallAverageScore + '</span>' +
+            '</div>'
+          );
+
+          rows.push(renderSections(result.sections));
+          container.innerHTML = rows.join('');
+          showDownloadButton(result);
+        }
+
+        function renderPerSubjectResults(data) {
+          var container = byId('results');
+          var rows = [];
+
+          rows.push(
+            '<div style="margin-bottom: 12px;">' +
+            '<span class="pill"><strong>Subjects</strong>: ' + data.subjects.length + '</span> ' +
+            '<span class="pill"><strong>Total responses</strong>: ' + data.totalResponseCount + '</span> ' +
+            '<span class="pill"><strong>Scale</strong>: 1-' + data.scaleLength + '</span>' +
+            '</div>'
+          );
+
+          data.subjects.forEach(function(subject, idx) {
+            var subjectId = 'subject-' + idx;
+            var relToggleId = subjectId + '-rel-toggle';
+            rows.push(
+              '<div class="subject-card">' +
+              '<div class="subject-header" onclick="toggleSubject(\'' + subjectId + '\')">' +
+              '<span class="subject-toggle" id="toggle-' + subjectId + '">+</span>' +
+              '<strong>' + escapeHtml(subject.subjectName) + '</strong>' +
+              (subject.subjectEmail ? ' <span class="muted">(' + escapeHtml(subject.subjectEmail) + ')</span>' : '') +
+              '<span class="pill" style="margin-left: 10px;"><strong>Overall</strong>: ' + subject.overallSummary.overallAverageScore + '/' + data.scaleLength + ' (' + subject.overallSummary.overallAveragePercentage + '%)</span>' +
+              '</div>' +
+              '<div class="subject-content hidden" id="' + subjectId + '">'
+            );
+
+            rows.push(renderSections(subject.overallSections));
+
+            rows.push(
+              '<div class="relationship-expand">' +
+              '<div class="relationship-expand-header" onclick="toggleRelationships(\'' + relToggleId + '\')">' +
+              '<span class="subject-toggle" id="toggle-' + relToggleId + '">+</span>' +
+              '<strong>View by Relationship</strong>' +
+              '</div>' +
+              '<div class="relationship-expand-content hidden" id="' + relToggleId + '">'
+            );
+
+            subject.relationships.forEach(function(rel) {
+              rows.push(
+                '<div class="relationship-block">' +
+                '<div class="relationship-block-header">' +
+                '<strong>' + escapeHtml(rel.relation) + '</strong>' +
+                '<span class="muted" style="margin-left: 8px;">(' + rel.evaluatorCount + ' evaluator' + (rel.evaluatorCount > 1 ? 's' : '') + ')</span>' +
+                '<span class="pill" style="margin-left: 10px;">' + rel.summary.overallAverageScore + '/' + data.scaleLength + ' (' + rel.summary.overallAveragePercentage + '%)</span>' +
+                '</div>' +
+                '</div>'
+              );
+            });
+
+            rows.push('</div></div>');
+            rows.push('</div></div>');
+          });
+
+          container.innerHTML = rows.join('');
+          showDownloadButton(data);
+        }
+
+        window.toggleSubject = function(subjectId) {
+          var content = document.getElementById(subjectId);
+          var toggle = document.getElementById('toggle-' + subjectId);
+          if (content.classList.contains('hidden')) {
+            content.classList.remove('hidden');
+            toggle.textContent = '-';
+          } else {
+            content.classList.add('hidden');
+            toggle.textContent = '+';
+          }
+        };
+
+        window.toggleRelationships = function(relToggleId) {
+          var content = document.getElementById(relToggleId);
+          var toggle = document.getElementById('toggle-' + relToggleId);
+          if (content.classList.contains('hidden')) {
+            content.classList.remove('hidden');
+            toggle.textContent = '-';
+          } else {
+            content.classList.add('hidden');
+            toggle.textContent = '+';
+          }
+        };
+
+        function generateManualInputs() {
+          var sectionsCount = Number(byId('manual-sections-count').value);
+          var questionsPerSection = Number(byId('manual-questions-per-section').value);
+
+          if (!isFinite(sectionsCount) || sectionsCount <= 0) {
+            throw new Error('Number of sections must be > 0');
+          }
+          if (!isFinite(questionsPerSection) || questionsPerSection <= 0) {
+            throw new Error('Questions per section must be > 0');
+          }
+
+          var host = byId('manual-generated');
+          var parts = [];
+
+          for (var s = 0; s < sectionsCount; s++) {
+            parts.push('<div class="sectionBlock" data-section-index="' + s + '">');
+            parts.push('<h3>Section ' + (s + 1) + '</h3>');
+            parts.push(
+              '<div class="row" style="grid-template-columns: 1fr;">' +
+              '<label>Section name <input type="text" data-role="section-name" value="Section ' + (s + 1) + '" /></label>' +
+              '</div>'
+            );
+
+            for (var q = 0; q < questionsPerSection; q++) {
+              parts.push(
+                '<div class="qRow" data-question-index="' + q + '">' +
+                '<label>Question text <input type="text" data-role="question-text" value="Question ' + (q + 1) + '" /></label>' +
+                '<label>Rating <input type="number" data-role="question-rating" value="1" min="0" /></label>' +
+                '</div>'
+              );
+            }
+            parts.push('</div>');
+          }
+
+          host.innerHTML = parts.join('');
+        }
+
+        function buildManualPayload() {
+          var name = byId('manual-survey-name').value.trim() || 'Manual Survey';
+          var scaleLength = Number(byId('manual-scale-length').value);
+          var normalizeToValue = Number(byId('manual-normalize-to').value);
+          var startScaleFromZero = byId('manual-start-zero').checked;
+          var roundingActive = byId('manual-rounding-active').checked;
+          var roundingDecimals = Number(byId('manual-rounding-decimals').value);
+
+          var host = byId('manual-generated');
+          var sectionEls = host.querySelectorAll('.sectionBlock');
+          if (sectionEls.length === 0) {
+            throw new Error('Click "Generate Inputs" first in Manual Mode.');
+          }
+
+          var sections = [];
+          var responses = [];
+
+          for (var sIdx = 0; sIdx < sectionEls.length; sIdx++) {
+            var sectionEl = sectionEls[sIdx];
+            var sectionNameInput = sectionEl.querySelector('input[data-role="section-name"]');
+            var sectionName = (sectionNameInput && sectionNameInput.value.trim()) || ('Section ' + (sIdx + 1));
+            var sectionId = 'S' + (sIdx + 1);
+
+            var qRows = sectionEl.querySelectorAll('.qRow');
+            var questions = [];
+
+            for (var qIdx = 0; qIdx < qRows.length; qIdx++) {
+              var row = qRows[qIdx];
+              var textInput = row.querySelector('input[data-role="question-text"]');
+              var ratingInput = row.querySelector('input[data-role="question-rating"]');
+
+              var qId = 'S' + (sIdx + 1) + '_Q' + (qIdx + 1);
+              var text = (textInput && textInput.value.trim()) || ('Question ' + (qIdx + 1));
+              var value = Number(ratingInput ? ratingInput.value : 1);
+
+              questions.push({ id: qId, text: text });
+              responses.push({ questionId: qId, value: value });
+            }
+
+            sections.push({ id: sectionId, name: sectionName, questions: questions });
+          }
+
+          var config = {
+            name: name,
+            normalizationSettings: {
+              normalizationType: 'score',
+              normalizeToValue: normalizeToValue,
+              scaleLength: scaleLength,
+              startScaleFromZero: startScaleFromZero,
+              roundOffScores: { active: roundingActive, value: roundingDecimals },
+              scoreBy: { inPercentage: true, inScore: true }
+            },
+            sections: sections
+          };
+
+          return { config: config, response: { responses: responses } };
+        }
+
+        async function handleManualCalculate() {
+          clearError();
+          try {
+            var payload = buildManualPayload();
+            var res = await fetch('/api/normalize/manual', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+            });
+            var data = await res.json();
+            if (!res.ok) {
+              throw new Error(data.error || 'API error');
+            }
+            renderResults(data);
+          } catch (e) {
+            showError(e.message || String(e));
+          }
+        }
+
+        async function handleApiCalculate() {
+          clearError();
+          try {
+            var surveyJsonRaw = byId('api-survey-json').value.trim();
+            var responsesRaw = byId('api-responses-json').value.trim();
+            if (!surveyJsonRaw) throw new Error('Survey JSON is required.');
+            if (!responsesRaw) throw new Error('Responses JSON is required.');
+
+            var surveyJson = JSON.parse(surveyJsonRaw);
+            var responses = JSON.parse(responsesRaw);
+
+            var res = await fetch('/api/normalize/api', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ surveyJson: surveyJson, responses: responses })
+            });
+            var data = await res.json();
+            if (!res.ok) {
+              throw new Error(data.error || 'API error');
+            }
+            renderResults(data);
+          } catch (e) {
+            showError(e.message || String(e));
+          }
+        }
+
+        function handleCsvFile(file) {
+          clearError();
+          csvText = null;
+          byId('csv-calc').disabled = true;
+          byId('csv-summary').classList.add('hidden');
+
+          if (!file || !file.name.toLowerCase().endsWith('.csv')) {
+            showError('Please select a .csv file.');
+            return;
+          }
+
+          var reader = new FileReader();
+          reader.onload = function() {
+            csvText = reader.result || '';
+            byId('csv-upload-label').textContent = file.name;
+            byId('csv-summary').textContent = 'File loaded. Click "Calculate from CSV" to process.';
+            byId('csv-summary').classList.remove('hidden');
+            byId('csv-calc').disabled = false;
+          };
+          reader.onerror = function() {
+            showError('Failed to read file.');
+          };
+          reader.readAsText(file, 'UTF-8');
+        }
+
+        function getCsvMode() {
+          var radios = document.querySelectorAll('input[name="csv-mode"]');
+          for (var i = 0; i < radios.length; i++) {
+            if (radios[i].checked) return radios[i].value;
+          }
+          return 'aggregate';
+        }
+
+        async function handleCsvCalculate() {
+          clearError();
+          hideDownloadButton();
+          if (!csvText) {
+            showError('Upload a CSV file first.');
+            return;
+          }
+          try {
+            var normalizeToValue = getNormalizeToValue();
+            var roundingActive = byId('csv-rounding-active').checked;
+            var roundingDecimals = Number(byId('csv-rounding-decimals').value);
+            var mode = getCsvMode();
+
+            if (mode === 'per-subject') {
+              var res = await fetch('/api/normalize/csv-by-subject', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  csvText: csvText,
+                  normalizeToValue: normalizeToValue,
+                  scaleLength: 5,
+                  startScaleFromZero: false,
+                  roundingActive: roundingActive,
+                  roundingDecimals: roundingDecimals
+                })
+              });
+              var data = await res.json();
+              if (!res.ok) {
+                throw new Error(data.error || 'API error');
+              }
+              byId('csv-summary').textContent = data.totalResponseCount + ' responses across ' + data.subjects.length + ' subjects, scale 1-' + data.scaleLength + '.';
+              renderPerSubjectResults(data);
+            } else {
+              var res = await fetch('/api/normalize/csv', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  csvText: csvText,
+                  normalizeToValue: normalizeToValue,
+                  roundingActive: roundingActive,
+                  roundingDecimals: roundingDecimals
+                })
+              });
+              var data = await res.json();
+              if (!res.ok) {
+                throw new Error(data.error || 'API error');
+              }
+              byId('csv-summary').textContent = data.responseCount + ' responses processed, scale 1-' + data.scaleLength + '.';
+              renderResults(data);
+            }
+          } catch (e) {
+            showError(e.message || String(e));
+          }
+        }
+
+        var selectedScaleValue = 5;
+
+        function setupScaleSelector() {
+          var scaleBtns = document.querySelectorAll('.scale-btn');
+          var customWrap = byId('scale-custom-wrap');
+          var customInput = byId('csv-normalize-to');
+
+          scaleBtns.forEach(function(btn) {
+            btn.addEventListener('click', function() {
+              scaleBtns.forEach(function(b) { b.classList.remove('scale-btn--active'); });
+              btn.classList.add('scale-btn--active');
+
+              var value = btn.getAttribute('data-value');
+              if (value === 'custom') {
+                customWrap.classList.remove('hidden');
+                customInput.focus();
+                selectedScaleValue = Number(customInput.value) || 5;
+              } else {
+                customWrap.classList.add('hidden');
+                selectedScaleValue = Number(value);
+                customInput.value = selectedScaleValue;
+              }
+            });
+          });
+
+          customInput.addEventListener('input', function() {
+            var val = Number(customInput.value);
+            if (val >= 1 && val <= 100) {
+              selectedScaleValue = val;
+            }
+          });
+        }
+
+        function getNormalizeToValue() {
+          return selectedScaleValue;
+        }
+
+        function wireUi() {
+          byId('tab-manual').addEventListener('click', function() { setActiveTab('manual'); });
+          byId('tab-api').addEventListener('click', function() { setActiveTab('api'); });
+          byId('tab-csv').addEventListener('click', function() { setActiveTab('csv'); });
+
+          byId('manual-generate').addEventListener('click', function() {
+            clearError();
+            try {
+              generateManualInputs();
+            } catch (e) {
+              showError(e.message || String(e));
+            }
+          });
+
+          byId('manual-calc').addEventListener('click', handleManualCalculate);
+          byId('api-calc').addEventListener('click', handleApiCalculate);
+          byId('csv-calc').addEventListener('click', handleCsvCalculate);
+          byId('download-json').addEventListener('click', downloadJson);
+
+          var csvUploadZone = byId('csv-upload-zone');
+          var csvFileInput = byId('csv-file-input');
+
+          csvUploadZone.addEventListener('click', function() { csvFileInput.click(); });
+          csvUploadZone.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              csvFileInput.click();
+            }
+          });
+          csvFileInput.addEventListener('change', function() {
+            var file = csvFileInput.files && csvFileInput.files[0];
+            if (file) handleCsvFile(file);
+          });
+          csvUploadZone.addEventListener('dragover', function(e) {
+            e.preventDefault();
+            csvUploadZone.classList.add('dragover');
+          });
+          csvUploadZone.addEventListener('dragleave', function() {
+            csvUploadZone.classList.remove('dragover');
+          });
+          csvUploadZone.addEventListener('drop', function(e) {
+            e.preventDefault();
+            csvUploadZone.classList.remove('dragover');
+            var file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+            if (file) handleCsvFile(file);
+          });
+
+          setupScaleSelector();
+        }
+
+        wireUi();
+      })();
+    </script>
+  </body>
+</html>

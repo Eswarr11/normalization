@@ -1,0 +1,178 @@
+---
+description: Normalization Calculator project rules - survey score normalization with CSV support
+alwaysApply: false
+---
+# Normalization Calculator
+
+TypeScript/Node.js app for normalizing survey scores from 360-degree feedback.
+
+## Project Overview
+
+Converts raw survey ratings into normalized percentages and scores with:
+- Per-subject breakdown by evaluator relationship (Self, Peer, Manager, Reportee)
+- Section and question-level detail
+- Configurable normalization scales (5, 10, or custom 1-100)
+
+## Architecture
+
+```
+Frontend (public/index.html) ──► API Server (scripts/serve.mjs) ──► TypeScript (src/)
+     │                                    │
+     │ fetch() POST                       │ imports dist/src/*.js
+     │                                    │
+     └── Inline JS + CSS                  └── csvParser, service, normalization
+```
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `public/index.html` | Single-page app with inline JS, handles UI + API calls |
+| `public/styles.css` | CSS with custom properties, indigo accent theme |
+| `scripts/serve.mjs` | Node HTTP server, serves static + API endpoints |
+| `src/csvParser.ts` | CSV parsing, per-subject grouping, normalization |
+| `src/normalization.ts` | Core normalize functions for ratings/sections |
+| `src/service.ts` | High-level service for manual/API modes |
+| `src/types.ts` | All TypeScript interfaces |
+
+## Quick Start
+
+```bash
+npm install          # Install dependencies
+npm run build        # Compile TypeScript
+npm run dev          # Start server + watch mode
+# Open http://localhost:5173
+```
+
+## API Endpoints
+
+All endpoints: `POST` with JSON body
+
+| Endpoint | Purpose |
+|----------|---------|
+| `/api/normalize/manual` | Manual config + responses |
+| `/api/normalize/csv` | Aggregate CSV responses |
+| `/api/normalize/csv-by-subject` | Per-subject CSV breakdown |
+
+## Normalization Formula
+
+```
+percentage = (rawValue / scaleLength) × 100
+score = (rawValue / scaleLength) × normalizeToValue
+```
+
+Example: raw=3, scale=5, normalizeToValue=5 → 60%, 3.0
+
+## CSV Requirements
+
+Required columns: `SubjectName` or `SubjectEmail`, `Relation`
+Rating columns: Headers with `(Out of N)` pattern
+Section/Question prefix: `N.M - Question text (Out of 5)`
+
+## Code Patterns
+
+### CSV Parser (`src/csvParser.ts`)
+
+Two main functions:
+- `parseResponsesCsv()` - Aggregate all responses
+- `parseResponsesCsvBySubject()` - Per-subject breakdown
+
+Key calculation: Subject overall = mean of relationship averages (not mean of all ratings)
+
+### Frontend (`public/index.html`)
+
+All JS is inline. Key functions:
+- `handleCsvCalculate()` - Calls API, renders results
+- `renderPerSubjectResults()` - Displays subject cards
+- `getNormalizeToValue()` - Gets scale from selector
+
+### Server (`scripts/serve.mjs`)
+
+Dynamically imports compiled modules from `dist/src/`:
+```javascript
+const csvParserModule = await import(join(distDir, 'src', 'csvParser.js'));
+```
+
+## Data Flow (CSV Per-Subject)
+
+```
+CSV File → parseCsvLine() → findMetaColumns() + ratingColumns
+    → Group rows by SubjectKey → Group by Relation
+    → Per-relation: avg ratings → normalize → section avgs
+    → Subject overall: mean of relationship scores
+    → Output: ParsedCsvBySubjectResult
+```
+
+## Type Hierarchy
+
+```typescript
+ParsedCsvBySubjectResult
+  └─ subjects: SubjectResult[]
+       ├─ relationships: RelationshipResult[]
+       │    └─ sections: NormalizedSectionResult[]
+       │         └─ questions: NormalizedQuestionResult[]
+       ├─ overallSections: NormalizedSectionResult[]
+       └─ overallSummary: NormalizedSurveySummary
+```
+
+## Development Guidelines
+
+1. **Build before testing**: Run `npm run build` after TypeScript changes
+2. **Server auto-imports**: Server loads compiled JS from `dist/`
+3. **Inline JS only**: Frontend JS is inline in index.html, not modules
+4. **No external UI libs**: Vanilla JS + CSS only
+5. **API returns JSON**: All endpoints return JSON responses
+
+## Common Tasks
+
+### Add new normalization option
+1. Add to `NormalizationOptions` in `src/csvParser.ts`
+2. Update API endpoint in `scripts/serve.mjs` to extract from body
+3. Update frontend form in `public/index.html`
+
+### Add new CSV column
+1. Update `findMetaColumns()` in `src/csvParser.ts`
+2. Add to `RowData` interface
+3. Use in grouping/calculation logic
+
+### Modify score calculation
+1. Edit `normalizeValue()` function in `csvParser.ts` (line ~355)
+2. Current: `(raw / scaleMax) * normalizeToValue`
+
+### Add UI feature
+1. Add HTML elements in `public/index.html`
+2. Add styles in `public/styles.css` (use CSS variables)
+3. Add event handlers in inline `<script>` block
+
+## CSS Variables
+
+```css
+--accent: #6366f1;        /* Primary indigo */
+--bg-page: #f8fafc;       /* Page background */
+--bg-card: #ffffff;       /* Card background */
+--text-primary: #1e293b;  /* Main text */
+--text-secondary: #64748b; /* Muted text */
+--border-color: #e2e8f0;  /* Borders */
+```
+
+## Testing
+
+```bash
+npm test  # Builds and runs tests in dist/tests/
+```
+
+Tests are in `tests/normalization.test.ts`, use Node's built-in test runner.
+
+## Debugging
+
+1. Check browser console for frontend errors
+2. Check terminal running `npm run dev` for server errors
+3. Verify `dist/` has latest compiled files
+4. API errors return `{ error: "message" }` JSON
+
+## File Modification Tips
+
+- **index.html**: Large file (~700 lines), search for function names
+- **csvParser.ts**: Main logic in `parseResponsesCsvBySubject()` (line 236+)
+- **styles.css**: CSS variables at top, components organized by type
+- **serve.mjs**: API routes start at line 64 (`handleApiRequest`)
